@@ -197,7 +197,7 @@ static void wavout_callback_proc(void *ctxt, void *buf, int len)
 int main(int argc, char *argv[])
 {
     TEST_CONTEXT test = {0};
-    char *eqfile   = "ffeq.txt";
+    char *eqfile   = "heavybass.txt";
     char *source   = "mic";
     int   samprate = 8000;
     int   framelen = 1024;
