@@ -2,128 +2,199 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include "wavdev.h"
+#include <math.h>
 #include "fft.h"
 #include "stft.h"
+#include "ffeq.h"
 
-#define FFT_LEN  256
 typedef struct {
-    float    eqcoeff[FFT_LEN];
-    void    *wavdev;
-    void    *fftf;
-    void    *ffti;
-    void    *stftf;
-    void    *stfti;
-    int      eqtype; // 0 - bypass, 1 - fft, 2 - stft
+    int    type;
+    int    fftlen;
+    int    frmlen;
+    void  *fftf;
+    void  *ffti;
+    float *coeff;
+    float *buffer;
+} FFEQ;
+
+void* ffeq_create(int type, int fftlen)
+{
+    FFEQ *ffeq = NULL;
+    int   i    = 0;
+    fftlen = fftlen ? fftlen : 256;
+    ffeq   = calloc(1, sizeof(FFEQ) + fftlen * sizeof(float) * 3);
+    if (!ffeq) return NULL;
+    ffeq->type   = type  ;
+    ffeq->fftlen = fftlen;
+    switch (ffeq->type) {
+    case FFEQ_TYPE_FFT:
+        ffeq->frmlen = ffeq->fftlen / 1;
+        ffeq->fftf   = fft_init (ffeq->fftlen, 0);
+        ffeq->ffti   = fft_init (ffeq->fftlen, 1);
+        break;
+    case FFEQ_TYPE_STFT:
+        ffeq->frmlen = ffeq->fftlen / 2;
+        ffeq->fftf   = stft_init(ffeq->fftlen, 0);
+        ffeq->ffti   = stft_init(ffeq->fftlen, 1);
+        break;
+    }
+    ffeq->coeff  = (float*)((char*)ffeq + sizeof(FFEQ));
+    ffeq->buffer = (float*)((char*)ffeq->coeff + fftlen * sizeof(float));
+    for (i=0; i<ffeq->fftlen/2; i++) ffeq->coeff[i] = ffeq->coeff[ffeq->fftlen - 1 - i] = 1;
+    if (!ffeq->fftf || !ffeq->ffti) {
+        ffeq_free(ffeq);
+        ffeq = NULL;
+    }
+    return ffeq;
+}
+
+void* ffeq_load(char *file)
+{
+    FFEQ *ffeq = NULL;
+    FILE *fp   = NULL;
+    int   type, fftlen, i;
+    char  str[256];
+
+    fp = fopen(file, "rb");
+    if (!fp) return NULL;
+
+    fscanf(fp, "%256s", str);
+    if      (strcmp(str, "fft" ) == 0) type = FFEQ_TYPE_FFT ;
+    else if (strcmp(str, "stft") == 0) type = FFEQ_TYPE_STFT;
+    else goto done;
+
+    fscanf(fp, "%256s", str);
+    fftlen = atoi(str);
+    fftlen = fftlen ? fftlen : 256;
+    ffeq   = ffeq_create(type, fftlen);
+    if (!ffeq) goto done;
+
+    for (i=0; i<ffeq->fftlen/2; i++) {
+        float fval; fscanf(fp, "%f", &fval);
+        ffeq->coeff[i] = ffeq->coeff[ffeq->fftlen - 1 - i] = pow(10.0, fval / 10.0);
+    }
+
+    if (0) {
+        printf("ffeq->type  : %d\n", ffeq->type  );
+        printf("ffeq->fftlen: %d\n", ffeq->fftlen);
+        printf("ffeq->frmlen: %d\n", ffeq->frmlen);
+        printf("ffeq->coeff :\n");
+        for (i=0; i<ffeq->fftlen; i++) printf("%8.2f%c", ffeq->coeff[i], i % 8 == 7 ? '\n' : ' ');
+        printf("\n"); fflush(stdout);
+    }
+
+done:
+    fclose(fp);
+    return ffeq;
+}
+
+int ffeq_save(void *ctxt, char *file)
+{
+    FFEQ *ffeq = (FFEQ*)ctxt;
+    if (ffeq) {
+        FILE *fp = fopen(file, "wb");
+        if (fp) {
+            static const char *TYPESTR[2] = { "fft", "stft" };
+            int    i;
+            fprintf(fp, "%s %d\r\n", TYPESTR[ffeq->type % 2], ffeq->fftlen);
+            for (i=0; i<ffeq->fftlen/2; i++) fprintf(fp, "%5.1f%s", 10 * log10(ffeq->coeff[i]), i % 16 == 15 ? "\r\n" : " ");
+            fclose(fp);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+void ffeq_free(void *ctxt)
+{
+    FFEQ *ffeq = (FFEQ*)ctxt;
+    if (ffeq) {
+        switch (ffeq->type) {
+        case FFEQ_TYPE_FFT:
+            fft_free (ffeq->fftf);
+            fft_free (ffeq->ffti);
+            break;
+        case FFEQ_TYPE_STFT:
+            stft_free(ffeq->fftf);
+            stft_free(ffeq->ffti);
+            break;
+        }
+        free(ffeq);
+    }
+}
+
+void ffeq_run(void *ctxt, char *frmdata)
+{
+    FFEQ *ffeq = (FFEQ*)ctxt;
+    if (ffeq) {
+        int  i;
+        for (i=0; i<ffeq->frmlen; i++) {
+            ffeq->buffer[i * 2 + 0] = ((int16_t*)frmdata)[i];
+            ffeq->buffer[i * 2 + 1] = 0;
+        }
+        if      (ffeq->type == FFEQ_TYPE_FFT ) fft_execute (ffeq->fftf, ffeq->buffer, ffeq->buffer);
+        else if (ffeq->type == FFEQ_TYPE_STFT) stft_execute(ffeq->fftf, ffeq->buffer, ffeq->buffer);
+        for (i=0; i<ffeq->fftlen; i++) {
+            ffeq->buffer[i * 2 + 0] *= ffeq->coeff[i];
+            ffeq->buffer[i * 2 + 1] *= ffeq->coeff[i];
+        }
+        if      (ffeq->type == FFEQ_TYPE_FFT ) fft_execute (ffeq->ffti, ffeq->buffer, ffeq->buffer);
+        else if (ffeq->type == FFEQ_TYPE_STFT) stft_execute(ffeq->ffti, ffeq->buffer, ffeq->buffer);
+        for (i=0; i<ffeq->frmlen; i++) {
+            if      (ffeq->buffer[i * 2 + 0] < -32767) ((int16_t*)frmdata)[i] = -32767;
+            else if (ffeq->buffer[i * 2 + 0] >  32768) ((int16_t*)frmdata)[i] = +32767;
+            else ((int16_t*)frmdata)[i] = ffeq->buffer[i * 2 + 0];
+        }
+    }
+}
+
+// "type", "fftlen", "frmlen", "coeff"
+void ffeq_getval(void *ctxt, char *key, void *val)
+{
+    FFEQ *ffeq = (FFEQ*)ctxt;
+    if (!ffeq || !key || !val) return;
+    if      (strcmp(key, "type"  ) == 0) *(int  * )val = ffeq->type  ;
+    else if (strcmp(key, "fftlen") == 0) *(int  * )val = ffeq->fftlen;
+    else if (strcmp(key, "frmlen") == 0) *(int  * )val = ffeq->frmlen;
+    else if (strcmp(key, "coeff" ) == 0) *(float**)val = ffeq->coeff ;
+}
+
+#ifdef _TEST_
+#include "wavdev.h"
+
+typedef struct {
+    void *wavdev;
+    void *ffeq;
 } TEST_CONTEXT;
 
 static void wavin_callback_proc(void *ctxt, void *buf, int len)
 {
-    TEST_CONTEXT *test   = (TEST_CONTEXT*)ctxt;
-    int16_t      *srcbuf = (int16_t*)buf;
-    int16_t       dstbuf [FFT_LEN];
-    float         fftbuf1[FFT_LEN * 2];
-    float         fftbuf2[FFT_LEN * 2];
-    int           i;
-
-    switch (test->eqtype) {
-    case 0: // bypass
-        memcpy(dstbuf, buf, sizeof(dstbuf));
-        break;
-    case 1: // fft
-        for (i=0; i<FFT_LEN; i++) {
-            fftbuf1[i * 2 + 0] = srcbuf[i];
-            fftbuf1[i * 2 + 1] = 0;
-        }
-        fft_execute(test->fftf, fftbuf1, fftbuf2);
-        for (i=0; i<FFT_LEN; i++) {
-            fftbuf2[i * 2 + 0] *= test->eqcoeff[i];
-            fftbuf2[i * 2 + 1] *= test->eqcoeff[i];
-        }
-        fft_execute(test->ffti, fftbuf2, fftbuf1);
-        for (i=0; i<FFT_LEN; i++) {
-            if (fftbuf1[i * 2 + 0] > 32767) {
-                dstbuf[i] = 32767;
-            } else if (fftbuf1[i * 2 + 0] < -32767) {
-                dstbuf[i] =-32767;
-            } else {
-                dstbuf[i] = fftbuf1[i * 2 + 0];
-            }
-        }
-        break;
-    case 2: // stft
-        for (i=0; i<FFT_LEN/2; i++) {
-            fftbuf1[i * 2 + 0] = srcbuf[i];
-            fftbuf1[i * 2 + 1] = 0;
-        }
-        stft_execute(test->stftf, fftbuf1, fftbuf2);
-        for (i=0; i<FFT_LEN; i++) {
-            fftbuf2[i * 2 + 0] *= test->eqcoeff[i];
-            fftbuf2[i * 2 + 1] *= test->eqcoeff[i];
-        }
-        stft_execute(test->stfti, fftbuf2, fftbuf1);
-        for (i=0; i<FFT_LEN/2; i++) {
-            if (fftbuf1[i * 2 + 0] > 32767) {
-                dstbuf[i] = 32767;
-            } else if (fftbuf1[i * 2 + 0] < -32767) {
-                dstbuf[i] =-32767;
-            } else {
-                dstbuf[i] = fftbuf1[i * 2 + 0];
-            }
-        }
-
-        for (i=0; i<FFT_LEN/2; i++) {
-            fftbuf1[i * 2 + 0] = srcbuf[FFT_LEN / 2 + i];
-            fftbuf1[i * 2 + 1] = 0;
-        }
-        stft_execute(test->stftf, fftbuf1, fftbuf2);
-        for (i=0; i<FFT_LEN; i++) {
-            fftbuf2[i * 2 + 0] *= test->eqcoeff[i];
-            fftbuf2[i * 2 + 1] *= test->eqcoeff[i];
-        }
-        stft_execute(test->stfti, fftbuf2, fftbuf1);
-        for (i=0; i<FFT_LEN/2; i++) {
-            if (fftbuf1[i * 2 + 0] > 32767) {
-                dstbuf[FFT_LEN / 2 + i] = 32767;
-            } else if (fftbuf1[i * 2 + 0] < -32767) {
-                dstbuf[FFT_LEN / 2 + i] =-32767;
-            } else {
-                dstbuf[FFT_LEN / 2 + i] = fftbuf1[i * 2 + 0];
-            }
-        }
-        break;
-    }
-    wavdev_play(test->wavdev, dstbuf, len);
+    TEST_CONTEXT *test = (TEST_CONTEXT*)ctxt;
+    ffeq_run(test->ffeq, buf);
+    wavdev_play(test->wavdev, buf, len);
 }
 
-static void load_eq_coeff(TEST_CONTEXT *test)
-{
-    int  i;
-    for (i=0; i<FFT_LEN; i++) {
-        test->eqcoeff[i] = 1;
-    }
-//  for (i=5 ; i<18; i++) test->eqcoeff[i] = test->eqcoeff[FFT_LEN - 1 - i] = 5;
-//  for (i=20; i<40; i++) test->eqcoeff[i] = test->eqcoeff[FFT_LEN - 1 - i] = 0.2;
-}
-
-int main(void)
+int main(int argc, char *argv[])
 {
     TEST_CONTEXT test = {0};
+    char *eqfile   = "ffeq.txt";
+    int   samprate = 8000;
+    int   framelen = 256;
+    int   i;
 
-    test.eqtype = 2;
-    switch (test.eqtype) {
-    case 1: // fft
-        test.fftf  = fft_init (FFT_LEN, 0);
-        test.ffti  = fft_init (FFT_LEN, 1);
-        break;
-    case 2: // stft
-        test.stftf = stft_init(FFT_LEN, 0);
-        test.stfti = stft_init(FFT_LEN, 1);
-        break;
+    for (i=1; i<argc; i++) {
+        if (strstr(argv[i], "--samprate=") == argv[i]) {
+            samprate = atoi(argv[i] + 11);
+        } else if (strstr(argv[i], "--eqfile=") == argv[i]) {
+            eqfile = argv[i] + 9;
+        }
     }
+    printf("eqfile  : %s\n", eqfile  );
+    printf("samprate: %d\n", samprate);
 
-    load_eq_coeff(&test);
-    test.wavdev = wavdev_init(8000, 1, FFT_LEN, wavin_callback_proc, &test, 8000, 1, FFT_LEN, NULL, NULL);
+    test.ffeq   = ffeq_load(eqfile);
+    ffeq_getval(test.ffeq, "frmlen", &framelen);
+    test.wavdev = wavdev_init(samprate, 1, framelen, wavin_callback_proc, &test, samprate, 1, framelen, NULL, NULL);
 
     while (1) {
         char cmd[256];
@@ -137,10 +208,8 @@ int main(void)
         }
     }
 
-    fft_free   (test.fftf  );
-    fft_free   (test.ffti  );
-    stft_free  (test.stftf );
-    stft_free  (test.stfti );
+    ffeq_free  (test.ffeq  );
     wavdev_exit(test.wavdev);
     return 0;
 }
+#endif
