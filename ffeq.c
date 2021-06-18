@@ -163,9 +163,23 @@ void ffeq_getval(void *ctxt, char *key, void *val)
 #include "wavdev.h"
 
 typedef struct {
-    void *wavdev;
-    void *ffeq;
+    void    *wavdev;
+    void    *ffeq;
+    int      frmlen;
+    FILE    *wavfile;
+    int16_t *wavbuf;
 } TEST_CONTEXT;
+
+static void play_pcm_file_buf(TEST_CONTEXT *test)
+{
+    if (test->wavbuf) {
+        int ret = fread(test->wavbuf, 1, test->frmlen * sizeof(int16_t), test->wavfile);
+        if (ret == test->frmlen * sizeof(int16_t)) {
+            ffeq_run(test->ffeq, (char*)test->wavbuf);
+            wavdev_play(test->wavdev, test->wavbuf, test->frmlen * sizeof(int16_t));
+        }
+    }
+}
 
 static void wavin_callback_proc(void *ctxt, void *buf, int len)
 {
@@ -174,12 +188,21 @@ static void wavin_callback_proc(void *ctxt, void *buf, int len)
     wavdev_play(test->wavdev, buf, len);
 }
 
+static void wavout_callback_proc(void *ctxt, void *buf, int len)
+{
+    TEST_CONTEXT *test = (TEST_CONTEXT*)ctxt;
+    play_pcm_file_buf(test);
+}
+
 int main(int argc, char *argv[])
 {
     TEST_CONTEXT test = {0};
     char *eqfile   = "ffeq.txt";
+    char *source   = "mic";
     int   samprate = 8000;
-    int   framelen = 256;
+    int   framelen = 1024;
+    int   inbufnum = 20;
+    int   outbufnum= 20;
     int   i;
 
     for (i=1; i<argc; i++) {
@@ -187,29 +210,50 @@ int main(int argc, char *argv[])
             samprate = atoi(argv[i] + 11);
         } else if (strstr(argv[i], "--eqfile=") == argv[i]) {
             eqfile = argv[i] + 9;
+        } else if (strstr(argv[i], "--source=") == argv[i]) {
+            source = argv[i] + 9;
+        } else if (strstr(argv[i], "--inbufnum=") == argv[i]) {
+            inbufnum = atoi(argv[i] + 11);
+        } else if (strstr(argv[i], "--outbufnum=") == argv[i]) {
+            outbufnum = atoi(argv[i] + 12);
         }
     }
-    printf("eqfile  : %s\n", eqfile  );
-    printf("samprate: %d\n", samprate);
 
     test.ffeq   = ffeq_load(eqfile);
     ffeq_getval(test.ffeq, "frmlen", &framelen);
-    test.wavdev = wavdev_init(samprate, 1, framelen, wavin_callback_proc, &test, samprate, 1, framelen, NULL, NULL);
+    test.frmlen = framelen;
+    test.wavdev = wavdev_init(samprate, 1, framelen, inbufnum, wavin_callback_proc, &test, samprate, 1, framelen, outbufnum, wavout_callback_proc, &test);
+
+    printf("eqfile   : %s\n", eqfile   );
+    printf("source   : %s\n", source   );
+    printf("samprate : %d\n", samprate );
+    printf("framelen : %d\n", framelen );
+    printf("inbufnum : %d\n", inbufnum );
+    printf("outbufnum: %d\n", outbufnum);
+    fflush(stdout);
+
+    if (strcmp(source, "mic") == 0) {
+        wavdev_record(test.wavdev, 1);
+    } else {
+        test.wavfile= fopen(source, "rb");
+        test.wavbuf = malloc(framelen * sizeof(int16_t));
+        for (i=0; i<outbufnum-1; i++) play_pcm_file_buf(&test);
+    }
 
     while (1) {
         char cmd[256];
         scanf("%256s", cmd);
-        if (strcmp(cmd, "rec_start") == 0) {
-            wavdev_record(test.wavdev, 1);
-        } else if (strcmp(cmd, "rec_stop") == 0) {
-            wavdev_record(test.wavdev, 0);
-        } else if (strcmp(test.wavdev, "quit") == 0 || strcmp(cmd, "exit") == 0) {
+        if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
             break;
         }
     }
 
-    ffeq_free  (test.ffeq  );
-    wavdev_exit(test.wavdev);
+    wavdev_record(test.wavdev, 0);
+    wavdev_exit  (test.wavdev);
+    ffeq_free    (test.ffeq  );
+    if (test.wavfile) fclose(test.wavfile);
+    if (test.wavbuf ) free  (test.wavbuf );
     return 0;
 }
 #endif
+

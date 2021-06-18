@@ -5,15 +5,16 @@
 #include "wavdev.h"
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define WAVEIN_BUF_NUM   5
-#define WAVEOUT_BUF_NUM  5
+#define MAX_WAVEIN_BUF_NUM   100
+#define MAX_WAVEOUT_BUF_NUM  100
 typedef struct {
     HWAVEIN  hWaveIn ;
-    WAVEHDR  sWaveInHdr[WAVEIN_BUF_NUM];
     HWAVEOUT hWaveOut;
-    WAVEHDR  sWaveOutHdr[WAVEOUT_BUF_NUM];
+    WAVEHDR  sWaveInHdr [MAX_WAVEIN_BUF_NUM ];
+    WAVEHDR  sWaveOutHdr[MAX_WAVEOUT_BUF_NUM];
     int      nWaveOutHead;
     int      nWaveOutTail;
+    int      nWaveOutBufn;
     HANDLE   hWaveOutSem ;
     #define FLAG_RECORDING (1 << 0)
     DWORD    dwFlags;
@@ -44,16 +45,21 @@ static void CALLBACK waveOutProc(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, 
     switch (uMsg) {
     case WOM_DONE:
         if (dev->outcallback) dev->outcallback(dev->outcbctxt, phdr->lpData, phdr->dwBytesRecorded);
-        if (++dev->nWaveOutHead == WAVEOUT_BUF_NUM) dev->nWaveOutHead = 0;
+        if (++dev->nWaveOutHead == dev->nWaveOutBufn) dev->nWaveOutHead = 0;
         ReleaseSemaphore(dev->hWaveOutSem, 1, NULL);
         break;
     }
 }
 
-void* wavdev_init(int in_samprate , int in_chnum , int in_frmsize , PFN_WAVEIN_CALLBACK  incallback , void *incbctxt,
-                  int out_samprate, int out_chnum, int out_frmsize, PFN_WAVEOUT_CALLBACK outcallback, void *outcbctxt)
+void* wavdev_init(int in_samprate , int in_chnum , int in_frmsize , int in_frmnum , PFN_WAVEIN_CALLBACK  incallback , void *incbctxt,
+                  int out_samprate, int out_chnum, int out_frmsize, int out_frmnum, PFN_WAVEOUT_CALLBACK outcallback, void *outcbctxt)
 {
-    WAVDEV *dev = calloc(1, sizeof(WAVDEV) + WAVEIN_BUF_NUM * in_frmsize * sizeof(int16_t) * in_chnum + WAVEOUT_BUF_NUM * out_frmsize * sizeof(int16_t) * out_chnum);
+    WAVDEV *dev = NULL;
+    in_frmnum   = in_frmnum  > 2 ? in_frmnum  : 2;
+    in_frmnum   = in_frmnum  < MAX_WAVEIN_BUF_NUM  ? in_frmnum  : MAX_WAVEIN_BUF_NUM ;
+    out_frmnum  = out_frmnum > 2 ? out_frmnum : 2;
+    out_frmnum  = out_frmnum < MAX_WAVEOUT_BUF_NUM ? out_frmnum : MAX_WAVEOUT_BUF_NUM;
+    dev = calloc(1, sizeof(WAVDEV) + in_frmnum * in_frmsize * sizeof(int16_t) * in_chnum + out_frmnum * out_frmsize * sizeof(int16_t) * out_chnum);
     if (dev) {
         WAVEFORMATEX wfx = {0};
         DWORD        result;
@@ -69,7 +75,7 @@ void* wavdev_init(int in_samprate , int in_chnum , int in_frmsize , PFN_WAVEIN_C
         if (result != MMSYSERR_NOERROR) {
             wavdev_exit(dev); dev = NULL;
         }
-        for (i=0; i<WAVEIN_BUF_NUM; i++) {
+        for (i=0; i<in_frmnum; i++) {
             dev->sWaveInHdr[i].dwBufferLength = in_frmsize * sizeof(int16_t) * in_chnum;
             dev->sWaveInHdr[i].lpData         = (LPSTR)dev + sizeof(WAVDEV) + i * in_frmsize * sizeof(int16_t) * in_chnum;
             waveInPrepareHeader(dev->hWaveIn, &dev->sWaveInHdr[i], sizeof(WAVEHDR));
@@ -87,18 +93,19 @@ void* wavdev_init(int in_samprate , int in_chnum , int in_frmsize , PFN_WAVEIN_C
         if (result != MMSYSERR_NOERROR) {
             wavdev_exit(dev); dev = NULL;
         }
-        for (i=0; i<WAVEOUT_BUF_NUM; i++) {
+        for (i=0; i<out_frmnum; i++) {
             dev->sWaveOutHdr[i].dwBufferLength = out_frmsize * sizeof(int16_t) * out_chnum;
-            dev->sWaveOutHdr[i].lpData         = (LPSTR)dev + sizeof(WAVDEV) + WAVEIN_BUF_NUM * in_frmsize * sizeof(int16_t) * in_chnum
+            dev->sWaveOutHdr[i].lpData         = (LPSTR)dev + sizeof(WAVDEV) + in_frmnum * in_frmsize * sizeof(int16_t) * in_chnum
                                                + i * out_frmsize * sizeof(int16_t) * out_chnum;
             waveOutPrepareHeader(dev->hWaveOut, &dev->sWaveOutHdr[i], sizeof(WAVEHDR));
         }
 
-        dev->hWaveOutSem = CreateSemaphore(NULL, WAVEOUT_BUF_NUM, WAVEOUT_BUF_NUM, NULL);
+        dev->hWaveOutSem = CreateSemaphore(NULL, out_frmnum, out_frmnum, NULL);
         dev->incallback    = incallback;
         dev->incbctxt      = incbctxt;
         dev->outcallback   = outcallback;
         dev->outcbctxt     = outcbctxt;
+        dev->nWaveOutBufn  = out_frmnum;
     }
     return dev;
 }
@@ -110,10 +117,14 @@ void wavdev_exit(void *ctxt)
         int i;
         CloseHandle (dev->hWaveOutSem);
         waveOutReset(dev->hWaveOut);
-        for (i=0; i<WAVEOUT_BUF_NUM; i++) waveOutUnprepareHeader(dev->hWaveOut, &dev->sWaveOutHdr[i], sizeof(WAVEHDR));
+        for (i=0; i<MAX_WAVEOUT_BUF_NUM; i++) {
+            if (dev->sWaveOutHdr[i].lpData) waveOutUnprepareHeader(dev->hWaveOut, &dev->sWaveOutHdr[i], sizeof(WAVEHDR));
+        }
         waveOutClose(dev->hWaveOut);
         waveInStop  (dev->hWaveIn );
-        for (i=0; i<WAVEIN_BUF_NUM ; i++) waveInUnprepareHeader (dev->hWaveIn , &dev->sWaveInHdr [i], sizeof(WAVEHDR));
+        for (i=0; i<MAX_WAVEIN_BUF_NUM ; i++) {
+            if (dev->sWaveInHdr [i].lpData) waveInUnprepareHeader (dev->hWaveIn , &dev->sWaveInHdr [i], sizeof(WAVEHDR));
+        }
         waveInClose (dev->hWaveIn );
         free(dev);
     }
@@ -126,7 +137,7 @@ void wavdev_play(void *ctxt, void *buf, int len)
         if (WAIT_OBJECT_0 != WaitForSingleObject(dev->hWaveOutSem, -1)) return;
         memcpy(dev->sWaveOutHdr[dev->nWaveOutTail].lpData, buf, MIN((int)dev->sWaveOutHdr[dev->nWaveOutTail].dwBufferLength, len));
         waveOutWrite(dev->hWaveOut, &dev->sWaveOutHdr[dev->nWaveOutTail], sizeof(WAVEHDR));
-        if (++dev->nWaveOutTail == WAVEOUT_BUF_NUM) dev->nWaveOutTail = 0;
+        if (++dev->nWaveOutTail == dev->nWaveOutBufn) dev->nWaveOutTail = 0;
     }
 }
 
