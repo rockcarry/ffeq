@@ -115,7 +115,7 @@ void wavdev_exit(void *ctxt)
     WAVDEV *dev = (WAVDEV*)ctxt;
     if (dev) {
         int i;
-        CloseHandle (dev->hWaveOutSem);
+        dev->incallback = dev->outcallback = NULL;
         waveOutReset(dev->hWaveOut);
         for (i=0; i<MAX_WAVEOUT_BUF_NUM; i++) {
             if (dev->sWaveOutHdr[i].lpData) waveOutUnprepareHeader(dev->hWaveOut, &dev->sWaveOutHdr[i], sizeof(WAVEHDR));
@@ -126,6 +126,7 @@ void wavdev_exit(void *ctxt)
             if (dev->sWaveInHdr [i].lpData) waveInUnprepareHeader (dev->hWaveIn , &dev->sWaveInHdr [i], sizeof(WAVEHDR));
         }
         waveInClose (dev->hWaveIn );
+        CloseHandle (dev->hWaveOutSem);
         free(dev);
     }
 }
