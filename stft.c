@@ -65,7 +65,7 @@ void stft_execute(void *c, float *in, float *out)
             ctxt->buffer_fft[i * 2 + 0] = in[(i - ctxt->length / 2) * 2 + 0] * ctxt->hannwin[i];
             ctxt->buffer_fft[i * 2 + 1] = in[(i - ctxt->length / 2) * 2 + 1] * ctxt->hannwin[i];
         }
-        fft_execute(ctxt->fft, ctxt->buffer_fft, out);
         memcpy(ctxt->buffer_overlap, in, sizeof(float) * 2 * ctxt->length / 2);
+        fft_execute(ctxt->fft, ctxt->buffer_fft, out);
     }
 }
