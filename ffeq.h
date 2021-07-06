@@ -1,12 +1,7 @@
 #ifndef __FFEQ_H__
 #define __FFEQ_H__
 
-enum {
-    FFEQ_TYPE_FFT,
-    FFEQ_TYPE_STFT,
-};
-
-void* ffeq_create(int type, int fftlen);
+void* ffeq_create(char *ffttype, int fftlen);
 void* ffeq_load  (char *file);
 int   ffeq_save  (void *ctxt, char *file);
 void  ffeq_free  (void *ctxt);

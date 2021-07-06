@@ -8,35 +8,38 @@
 #include "ffeq.h"
 
 typedef struct {
-    int    type;
+    char   ffttype[8];
     int    fftlen;
     int    frmlen;
     void  *fftf;
     void  *ffti;
     float *coeff;
     float *buffer;
+    void (*pfn_fft_free   )(void *c);
+    void (*pfn_fft_execute)(void *c, float *in, float *out);
 } FFEQ;
 
-void* ffeq_create(int type, int fftlen)
+void* ffeq_create(char *ffttype, int fftlen)
 {
     FFEQ *ffeq = NULL;
     int   i    = 0;
     fftlen = fftlen ? fftlen : 256;
     ffeq   = calloc(1, sizeof(FFEQ) + fftlen * sizeof(float) * 3);
     if (!ffeq) return NULL;
-    ffeq->type   = type  ;
+    strncpy(ffeq->ffttype, ffttype, sizeof(ffeq->ffttype));
     ffeq->fftlen = fftlen;
-    switch (ffeq->type) {
-    case FFEQ_TYPE_FFT:
+    if (strcmp(ffttype, "fft") == 0) {
         ffeq->frmlen = ffeq->fftlen / 1;
         ffeq->fftf   = fft_init (ffeq->fftlen, 0);
         ffeq->ffti   = fft_init (ffeq->fftlen, 1);
-        break;
-    case FFEQ_TYPE_STFT:
+        ffeq->pfn_fft_free    = fft_free;
+        ffeq->pfn_fft_execute = fft_execute;
+    } else if (strcmp(ffttype, "stft") == 0) {
         ffeq->frmlen = ffeq->fftlen / 2;
         ffeq->fftf   = stft_init(ffeq->fftlen, 0);
         ffeq->ffti   = stft_init(ffeq->fftlen, 1);
-        break;
+        ffeq->pfn_fft_free    = stft_free;
+        ffeq->pfn_fft_execute = stft_execute;
     }
     ffeq->coeff  = (float*)((char*)ffeq + sizeof(FFEQ));
     ffeq->buffer = (float*)((char*)ffeq->coeff + fftlen * sizeof(float));
@@ -52,21 +55,16 @@ void* ffeq_load(char *file)
 {
     FFEQ *ffeq = NULL;
     FILE *fp   = NULL;
-    int   type, fftlen, i;
-    char  str[256];
+    int   fftlen, i;
+    char  ffttype[8];
 
     fp = fopen(file, "rb");
     if (!fp) return NULL;
 
-    fscanf(fp, "%256s", str);
-    if      (strcmp(str, "fft" ) == 0) type = FFEQ_TYPE_FFT ;
-    else if (strcmp(str, "stft") == 0) type = FFEQ_TYPE_STFT;
-    else goto done;
-
-    fscanf(fp, "%256s", str);
-    fftlen = atoi(str);
+    fscanf(fp, "%8s",  ffttype);
+    fscanf(fp, "%d" , &fftlen );
     fftlen = fftlen ? fftlen : 256;
-    ffeq   = ffeq_create(type, fftlen);
+    ffeq   = ffeq_create(ffttype, fftlen);
     if (!ffeq) goto done;
 
     for (i=0; i<ffeq->fftlen/2; i++) {
@@ -75,7 +73,7 @@ void* ffeq_load(char *file)
     }
 
     if (0) {
-        printf("ffeq->type  : %d\n", ffeq->type  );
+        printf("ffeq->type  : %s\n", ffttype     );
         printf("ffeq->fftlen: %d\n", ffeq->fftlen);
         printf("ffeq->frmlen: %d\n", ffeq->frmlen);
         printf("ffeq->coeff :\n");
@@ -94,9 +92,8 @@ int ffeq_save(void *ctxt, char *file)
     if (ffeq) {
         FILE *fp = fopen(file, "wb");
         if (fp) {
-            static const char *TYPESTR[2] = { "fft", "stft" };
-            int    i;
-            fprintf(fp, "%s %d\r\n", TYPESTR[ffeq->type % 2], ffeq->fftlen);
+            int  i;
+            fprintf(fp, "%s %d\r\n", ffeq->ffttype, ffeq->fftlen);
             for (i=0; i<ffeq->fftlen/2; i++) fprintf(fp, "%5.1f%s", 10 * log10(ffeq->coeff[i]), i % 16 == 15 ? "\r\n" : " ");
             fclose(fp);
             return 0;
@@ -109,16 +106,8 @@ void ffeq_free(void *ctxt)
 {
     FFEQ *ffeq = (FFEQ*)ctxt;
     if (ffeq) {
-        switch (ffeq->type) {
-        case FFEQ_TYPE_FFT:
-            fft_free (ffeq->fftf);
-            fft_free (ffeq->ffti);
-            break;
-        case FFEQ_TYPE_STFT:
-            stft_free(ffeq->fftf);
-            stft_free(ffeq->ffti);
-            break;
-        }
+        ffeq->pfn_fft_free(ffeq->fftf);
+        ffeq->pfn_fft_free(ffeq->ffti);
         free(ffeq);
     }
 }
@@ -132,14 +121,12 @@ void ffeq_run(void *ctxt, char *frmdata)
             ffeq->buffer[i * 2 + 0] = ((int16_t*)frmdata)[i];
             ffeq->buffer[i * 2 + 1] = 0;
         }
-        if      (ffeq->type == FFEQ_TYPE_FFT ) fft_execute (ffeq->fftf, ffeq->buffer, ffeq->buffer);
-        else if (ffeq->type == FFEQ_TYPE_STFT) stft_execute(ffeq->fftf, ffeq->buffer, ffeq->buffer);
+        ffeq->pfn_fft_execute(ffeq->fftf, ffeq->buffer, ffeq->buffer);
         for (i=0; i<ffeq->fftlen; i++) {
             ffeq->buffer[i * 2 + 0] *= ffeq->coeff[i];
             ffeq->buffer[i * 2 + 1] *= ffeq->coeff[i];
         }
-        if      (ffeq->type == FFEQ_TYPE_FFT ) fft_execute (ffeq->ffti, ffeq->buffer, ffeq->buffer);
-        else if (ffeq->type == FFEQ_TYPE_STFT) stft_execute(ffeq->ffti, ffeq->buffer, ffeq->buffer);
+        ffeq->pfn_fft_execute(ffeq->ffti, ffeq->buffer, ffeq->buffer);
         for (i=0; i<ffeq->frmlen; i++) {
             if      (ffeq->buffer[i * 2 + 0] < -32767) ((int16_t*)frmdata)[i] = -32767;
             else if (ffeq->buffer[i * 2 + 0] >  32768) ((int16_t*)frmdata)[i] = +32767;
@@ -153,7 +140,7 @@ void ffeq_getval(void *ctxt, char *key, void *val)
 {
     FFEQ *ffeq = (FFEQ*)ctxt;
     if (!ffeq || !key || !val) return;
-    if      (strcmp(key, "type"  ) == 0) *(int  * )val = ffeq->type  ;
+    if      (strcmp(key, "type"  ) == 0) strncpy((char*)val, ffeq->ffttype, 8);
     else if (strcmp(key, "fftlen") == 0) *(int  * )val = ffeq->fftlen;
     else if (strcmp(key, "frmlen") == 0) *(int  * )val = ffeq->frmlen;
     else if (strcmp(key, "coeff" ) == 0) *(float**)val = ffeq->coeff ;
