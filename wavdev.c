@@ -44,7 +44,7 @@ static void CALLBACK waveOutProc(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, 
     WAVEHDR *phdr= (WAVEHDR*)dwParam1;
     switch (uMsg) {
     case WOM_DONE:
-        if (dev->outcallback) dev->outcallback(dev->outcbctxt, phdr->lpData, phdr->dwBytesRecorded);
+        if (dev->outcallback) dev->outcallback(dev->outcbctxt, phdr->lpData, phdr->dwBufferLength);
         if (++dev->nWaveOutHead == dev->nWaveOutBufn) dev->nWaveOutHead = 0;
         ReleaseSemaphore(dev->hWaveOutSem, 1, NULL);
         break;
