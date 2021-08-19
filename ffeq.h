@@ -1,7 +1,7 @@
 #ifndef __FFEQ_H__
 #define __FFEQ_H__
 
-void* ffeq_create(char *type, int fftlen, int anrintensity); // type: "fft", "stft", "anr"
+void* ffeq_create(int type, int fftlen, int anrintensity, int shift); // type: 0 - fft, 1 - stft
 void* ffeq_load  (char *file);
 int   ffeq_save  (void *ctxt, char *file);
 void  ffeq_free  (void *ctxt);
